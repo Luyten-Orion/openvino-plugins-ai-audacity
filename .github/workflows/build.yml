@@ -1,0 +1,81 @@
+name: Build OpenVINO Audacity Module
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - '*'
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y build-essential cmake git python3-pip unzip wget libgtk2.0-dev libasound2-dev libjack-jackd2-dev uuid-dev git-lfs ocl-icd-opencl-dev
+          sudo pip3 install conan
+
+      - name: Setup OpenVINO Toolkit
+        run: |
+          wget https://storage.openvinotoolkit.org/repositories/openvino/packages/2024.6/linux/l_openvino_toolkit_ubuntu22_2024.6.0.17404.4c0f47d2335_x86_64.tgz
+          tar xvf l_openvino_toolkit_ubuntu22_2024.6.0.17404.4c0f47d2335_x86_64.tgz
+          cd l_openvino_toolkit_ubuntu22_2024.6.0.17404.4c0f47d2335_x86_64/install_dependencies/
+          sudo -E ./install_openvino_dependencies.sh
+          cd ..
+          source setupvars.sh
+
+      - name: Setup Libtorch
+        run: |
+          wget https://download.pytorch.org/libtorch/cpu/libtorch-cxx11-abi-shared-with-deps-2.4.1%2Bcpu.zip
+          unzip libtorch-cxx11-abi-shared-with-deps-2.4.1+cpu.zip
+          echo "LIBTORCH_ROOTDIR=$(pwd)/libtorch" >> $GITHUB_ENV
+
+      - name: Build Whisper.cpp
+        run: |
+          git clone https://github.com/ggerganov/whisper.cpp
+          cd whisper.cpp
+          git checkout v1.5.4
+          cd ..
+          mkdir whisper-build
+          cd whisper-build
+          cmake ../whisper.cpp/ -DWHISPER_OPENVINO=ON
+          make -j4
+          cmake --install . --config Release --prefix ./installed
+          echo "WHISPERCPP_ROOTDIR=$(pwd)/installed" >> $GITHUB_ENV
+          echo "LD_LIBRARY_PATH=$(pwd)/installed/lib:$LD_LIBRARY_PATH" >> $GITHUB_ENV
+
+      - name: Build Audacity (vanilla)
+        run: |
+          git clone https://github.com/audacity/audacity.git
+          cd audacity
+          git checkout release-3.7.1
+          cd ..
+          mkdir audacity-build
+          cd audacity-build
+          cmake -G "Unix Makefiles" ../audacity -DCMAKE_BUILD_TYPE=Release
+          make -j$(nproc)
+
+      - name: Add OpenVINO module
+        run: |
+          git clone https://github.com/intel/openvino-plugins-ai-audacity.git
+          cp -r openvino-plugins-ai-audacity/mod-openvino audacity/modules/
+          sed -i '/add_subdirectory(mod-openvino)/!b;n;a\add_subdirectory(mod-openvino)' audacity/modules/CMakeLists.txt
+
+      - name: Build Audacity with OpenVINO module
+        run: |
+          cd audacity-build
+          cmake -G "Unix Makefiles" ../audacity -DCMAKE_BUILD_TYPE=Release
+          make -j$(nproc)
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: audacity-openvino-build
+          path: audacity-build/Release/
